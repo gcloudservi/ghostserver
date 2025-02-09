@@ -56,7 +56,7 @@ func requestHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("收到请求: %s %s 来自 %s", r.Method, r.URL, r.RemoteAddr)
 
 	// 检查请求路径是否匹配特定路径
-	if r.URL.Path == "/"+routeXMLPath && r.Method == "GET" {
+	if strings.HasPrefix(r.URL.Path, "/hide/route.") && r.Method == "GET" { // 修改为前缀判断
 		serveRouteXML(w, r)
 	} else {
 		// 处理 POST 请求
@@ -123,7 +123,9 @@ func requestHandler(w http.ResponseWriter, r *http.Request) {
 
 			log.Printf("成功返回 %s 给 %s", jsonFilePath, r.RemoteAddr)
 
-		} else if strings.HasPrefix(r.URL.Path, "/hide/versions/") && r.Method == "GET" { // 使用 strings.HasPrefix 替代切片
+		} else if strings.HasPrefix(r.URL.Path, "/hide/versions/") && r.Method == "GET" {
+			serveVersions(w, r)
+		} else if strings.HasPrefix(r.URL.Path, "/hide/version/") && r.Method == "GET" { // 添加对 /hide/version/ 路径的处理
 			serveVersions(w, r)
 		} else {
 			http.Redirect(w, r, redirectURL, http.StatusFound)
@@ -135,9 +137,23 @@ func requestHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func serveRouteXML(w http.ResponseWriter, r *http.Request) {
-	// 构建 route.xml 的完整路径
-	xmlFilePath := filepath.Join(httpDir, "route.xml")
-	log.Printf("route.xml 文件不存在: %s", xmlFilePath)
+	// 从请求的 URL 中提取文件名
+	u, err := url.Parse(r.URL.String())
+	if err != nil {
+		log.Printf("解析 URL 失败: %v", err)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(fmt.Sprintf(`{"errorCode":-7,"errorMsg":"Failed to parse URL: %v"}`, err)))
+		return
+	}
+	path := u.Path
+	filename := filepath.Base(path) // 提取文件名，例如 route.xml 或 fyuyu.xml
+
+	// 构建 route 目录下的文件的完整路径
+	routeDir := filepath.Join(httpDir, "route") // route 目录
+	xmlFilePath := filepath.Join(routeDir, filename) // 完整路径
+
+	log.Printf("route.xml 文件路径: %s", xmlFilePath) // 更新日志
 
 	// 检查 route.xml 是否存在
 	if _, err := os.Stat(xmlFilePath); os.IsNotExist(err) {
