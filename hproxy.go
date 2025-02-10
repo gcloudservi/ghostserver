@@ -1,233 +1,210 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
-	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
-	"strings" // 导入 strings 包
-	"time"
+	"strconv" // 确保导入 strconv 包
+	"strings"
 )
 
-const (
-	port         = 8089
-	httpDir      = "http" // 存放 HTTP 文件的子目录
-	routeXMLPath = "hide/route.xml"
-	redirectURL  = "https://update.version.brmyx.com/dmm_share/index.html?bundle=com.bairimeng.dmmdzz.betazone"
+// 全局变量用于配置目录路径，方便修改
+var (
+	versionsDir = "versions" // 版本文件目录
+	routeDir    = "route"    // 路由文件目录
+	httpDir     = "http"     // HTTP 文件目录
+	port        = ":8089"    // 监听端口，修改为 8089
+	errorFile   = "http/error.json" // 错误信息文件路径
+	redirectURL = "https://update.version.brmyx.com/dmm_share/index.html?bundle=com.bairimeng.dmmdzz.betazone" // 跳转 URL
 )
+
+// ErrorResponse 定义错误响应结构
+type ErrorResponse struct {
+	ErrorCode int    `json:"errorCode"`
+	ErrorMsg  string `json:"errorMsg,omitempty"` // 错误信息，omitempty 表示为空时不输出
+}
 
 func main() {
-	// 设置日志同时输出到文件和控制台
-	logFile, err := os.OpenFile("server.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
-	if err != nil {
-		log.Fatalf("无法打开日志文件: %v", err)
-	}
-	defer logFile.Close()
-	log.SetOutput(io.MultiWriter(os.Stdout, logFile))
-	log.SetFlags(log.LstdFlags | log.Lshortfile) // 日志中包含时间戳和文件:行号
-
-	// 如果 http 目录不存在，则创建它
-	if _, err := os.Stat(httpDir); os.IsNotExist(err) {
-		if err := os.Mkdir(httpDir, 0755); err != nil {
-			log.Fatalf("创建 http 目录失败: %v", err)
-		}
-	}
-
-	// HTTP 请求处理函数
+	// 启动 HTTP 服务器
 	http.HandleFunc("/", requestHandler)
-
-	// 启动服务器
-	addr := fmt.Sprintf(":%d", port)
-	log.Printf("服务器已启动，端口号 %d", port)
-	log.Printf("针对 /%s 的请求将返回 route.xml", routeXMLPath)
-	log.Printf("针对 /hide/versions/ 的请求将返回 versions 目录下的文件")
-	err = http.ListenAndServe(addr, nil)
+	log.Printf("服务器已启动，监听端口 %s", port)
+	err := http.ListenAndServe(port, nil)
 	if err != nil {
-		log.Fatalf("ListenAndServe 错误: %v", err)
+		log.Fatal("服务器启动失败: ", err)
 	}
 }
 
 func requestHandler(w http.ResponseWriter, r *http.Request) {
-	startTime := time.Now()
-	log.Printf("收到请求: %s %s 来自 %s", r.Method, r.URL, r.RemoteAddr)
+	log.Printf("接收到请求: 方法=%s, 路径=%s", r.Method, r.URL.Path)
+	//log.Printf("完整URL: %s", r.URL.String())
+	//log.Printf("请求头: %+v", r.Header)
+	//contentType := r.Header.Get("Content-Type")
+	//log.Printf("Content-Type: %s", contentType)
 
-	// 检查请求路径是否匹配特定路径
-	if strings.HasPrefix(r.URL.Path, "/hide/route.") && r.Method == "GET" { // 修改为前缀判断
-		serveRouteXML(w, r)
-	} else {
-		// 处理 POST 请求
-		if r.Method == "POST" {
-			body, err := ioutil.ReadAll(r.Body)
-			if err != nil {
-				log.Printf("读取请求体失败: %v", err)
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusOK)
-				w.Write([]byte(fmt.Sprintf(`{"errorCode":-2,"errorMsg":"Failed to read request body: %v"}`, err)))
-				return
-			}
-			defer r.Body.Close()
+	// 获取程序运行目录
+	programDir, err := os.Getwd()
+	if err != nil {
+		log.Println("获取程序目录失败:", err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
 
-			// 解析 POST 数据
-			values, err := url.ParseQuery(string(body))
-			if err != nil {
-				log.Printf("解析 POST 数据失败: %v", err)
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusOK)
-				w.Write([]byte(fmt.Sprintf(`{"errorCode":-3,"errorMsg":"Failed to parse POST data: %v"}`, err)))
-				return
-			}
-
-			// 获取并解码 msg 参数
-			msgEncoded := values.Get("msg")
-			msgDecoded, err := url.QueryUnescape(msgEncoded) // 进行 URL 解码
-			// 输出解码后的 msg 数据
-			log.Printf("收到 POST 请求体数据: msg_id=%s&msg=%s", values.Get("msg_id"), msgDecoded)
-
-			msgID := values.Get("msg_id")
-			if msgID == "" {
-				log.Printf("未找到 msg_id 参数")
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusOK)
-				w.Write([]byte(`{"errorCode":-9,"errorMsg":"msg_id parameter not found"}`))
-				return
-			}
-
-			// 根据 msg_id 构建 JSON 文件路径
-			jsonFilePath := filepath.Join(httpDir, msgID+".json")
-
-			// 检查 JSON 文件是否存在
-			if _, err := os.Stat(jsonFilePath); os.IsNotExist(err) {
-				log.Printf("文件 %s 不存在", jsonFilePath)
-				// 返回自定义的错误信息
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusOK) //这里可以改为其他的状态码
-				w.Write([]byte(fmt.Sprintf(`{"errorCode":-13,"errorMsg":"File %s not found"}`, msgID)))
-				return
-			}
-
-			// 读取 JSON 文件内容
-			jsonContent, err := ioutil.ReadFile(jsonFilePath)
-			if err != nil {
-				log.Printf("读取文件 %s 失败: %v", jsonFilePath, err)
-				http.Error(w, "Internal server error", http.StatusInternalServerError)
-				return
-			}
-
-			// 设置响应头并返回 JSON 内容
-			w.Header().Set("Content-Type", "application/json")
-			w.Write(jsonContent)
-
-			log.Printf("成功返回 %s 给 %s", jsonFilePath, r.RemoteAddr)
-
-		} else if strings.HasPrefix(r.URL.Path, "/hide/versions/") && r.Method == "GET" {
-			serveVersions(w, r)
-		} else if strings.HasPrefix(r.URL.Path, "/hide/version/") && r.Method == "GET" { // 添加对 /hide/version/ 路径的处理
-			serveVersions(w, r)
+	// 处理 GET 请求
+	if r.Method == http.MethodGet {
+		if strings.HasPrefix(r.URL.Path, "/hide/version/") || strings.HasPrefix(r.URL.Path, "/hide/versions/") {
+			// 转发到 versions 目录
+			filePath := filepath.Join(programDir, versionsDir, filepath.Base(r.URL.Path))
+			log.Printf("转发 GET 请求到文件: %s", filePath)
+			serveFile(filePath, w, r) // 使用正确的 serveFile 调用
+			return
+		} else if strings.HasPrefix(r.URL.Path, "/hide/") {
+			// 转发到 route 目录
+			filePath := filepath.Join(programDir, routeDir, filepath.Base(r.URL.Path))
+			log.Printf("转发 GET 请求到文件: %s", filePath)
+			serveFile(filePath, w, r) // 使用正确的 serveFile 调用
+			return
 		} else {
+			// 其他 GET 请求，执行 302 跳转
+			//log.Printf("GET 请求路径未匹配，跳转到: %s", redirectURL)
 			http.Redirect(w, r, redirectURL, http.StatusFound)
+			return
+		}
+	} else if r.Method == http.MethodPost {
+		// 处理 POST 请求
+		bodyBytes, err := ioutil.ReadAll(r.Body)
+		if err != nil {
+			log.Println("读取 POST 请求体失败:", err)
+			errorResponse(w, programDir, "读取请求体失败", err) // 使用 errorResponse 返回错误
+			return
+		}
+		bodyString := string(bodyBytes)
+
+		// 手动解析 text/plain 请求体
+		msgID, msg, err := parseTextPlainBody(bodyString)
+		if err != nil {
+			log.Println("解析 POST 请求体失败:", err)
+			errorResponse(w, programDir, "解析 POST 请求体失败", err) // 使用 errorResponse 返回错误
+			return
+		}
+
+		log.Printf("接收到 POST 请求, msg_id=%d, msg=%s", msgID, msg)
+
+		// 构建 JSON 文件路径
+		filePath := filepath.Join(programDir, httpDir, fmt.Sprintf("%d.json", msgID))
+		log.Printf("转发 POST 请求到文件: %s", filePath)
+
+		// 检查文件是否存在
+		if _, err := os.Stat(filePath); os.IsNotExist(err) {
+			log.Printf("文件不存在: %s", filePath)
+			errorResponse(w, programDir, "文件不存在", fmt.Errorf("file not found: %s", filePath)) // 使用 errorResponse 返回错误
+			return
+		}
+
+		// 读取 JSON 文件内容
+		jsonContent, err := ioutil.ReadFile(filePath)
+		if err != nil {
+			log.Printf("读取文件 %s 失败: %v", filePath, err)
+			errorResponse(w, programDir, "读取文件失败", err) // 使用 errorResponse 返回错误
+			return
+		}
+
+		// 设置响应头并返回 JSON 内容
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write(jsonContent)
+		return
+	}
+
+	// 其他情况返回 404
+	log.Println("未匹配到任何转发规则，返回 404")
+	http.NotFound(w, r)
+}
+
+// errorResponse 读取 error.json 文件并返回错误响应
+func errorResponse(w http.ResponseWriter, programDir string, logMsg string, err error) {
+	log.Println(logMsg, ":", err) // 记录日志
+
+	errorFilePath := filepath.Join(programDir, errorFile)
+	errorContent, readErr := ioutil.ReadFile(errorFilePath)
+	if readErr != nil {
+		log.Println("读取错误信息文件失败:", readErr)
+		// 如果读取 error.json 失败，则返回默认错误响应
+		defaultErrorResponse := ErrorResponse{ErrorCode: -1, ErrorMsg: "Internal Server Error"}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK) // 仍然返回 200 OK
+		json.NewEncoder(w).Encode(defaultErrorResponse)
+		return
+	}
+
+	var errResp ErrorResponse
+	if jsonErr := json.Unmarshal(errorContent, &errResp); jsonErr != nil {
+		log.Println("解析错误信息 JSON 失败:", jsonErr)
+		// 如果解析 error.json 失败，则返回默认错误响应
+		defaultErrorResponse := ErrorResponse{ErrorCode: -1, ErrorMsg: "Internal Server Error"}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK) // 仍然返回 200 OK
+		json.NewEncoder(w).Encode(defaultErrorResponse)
+		return
+	}
+
+	// 添加 ErrorMsg
+	errResp.ErrorMsg = err.Error()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK) // 仍然返回 200 OK
+	json.NewEncoder(w).Encode(errResp)
+}
+
+
+// parseTextPlainBody 用于解析 text/plain 类型的请求体
+func parseTextPlainBody(body string) (int, string, error) {
+	msgID := -1
+	msg := ""
+
+	pairs := strings.Split(body, "&")
+	for _, pair := range pairs {
+		parts := strings.SplitN(pair, "=", 2)
+		if len(parts) != 2 {
+			continue // 忽略格式错误的键值对
+		}
+		key := parts[0]
+		value := parts[1]
+
+		switch key {
+		case "msg_id":
+			id, err := strconv.Atoi(value)
+			if err != nil {
+				return -1, "", fmt.Errorf("invalid msg_id: %w", err)
+			}
+			msgID = id
+		case "msg":
+			msg = value
 		}
 	}
 
-	duration := time.Since(startTime)
-	log.Printf("请求处理耗时 %v", duration)
+	if msgID == -1 {
+		return -1, "", fmt.Errorf("missing msg_id")
+	}
+
+	return msgID, msg, nil
 }
 
-func serveRouteXML(w http.ResponseWriter, r *http.Request) {
-	// 从请求的 URL 中提取文件名
-	u, err := url.Parse(r.URL.String())
-	if err != nil {
-		log.Printf("解析 URL 失败: %v", err)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(fmt.Sprintf(`{"errorCode":-7,"errorMsg":"Failed to parse URL: %v"}`, err)))
-		return
-	}
-	path := u.Path
-	filename := filepath.Base(path) // 提取文件名，例如 route.xml 或 fyuyu.xml
-
-	// 构建 route 目录下的文件的完整路径
-	routeDir := filepath.Join(httpDir, "route") // route 目录
-	xmlFilePath := filepath.Join(routeDir, filename) // 完整路径
-
-	log.Printf("route.xml 文件路径: %s", xmlFilePath) // 更新日志
-
-	// 检查 route.xml 是否存在
-	if _, err := os.Stat(xmlFilePath); os.IsNotExist(err) {
-		log.Printf("route.xml 文件不存在: %s", xmlFilePath)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(fmt.Sprintf(`{"errorCode":-5,"errorMsg":"route.xml file not found: %s"}`, xmlFilePath)))
-		return
-	}
-
-	// 读取 route.xml 的内容
-	xmlContent, err := ioutil.ReadFile(xmlFilePath)
-	if err != nil {
-		log.Printf("读取 route.xml 文件失败: %v", err)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(fmt.Sprintf(`{"errorCode":-6,"errorMsg":"Failed to read route.xml file: %v"}`, err)))
-		return
-	}
-
-	// 设置响应头并发送 XML 内容
-	w.Header().Set("Content-Type", "application/xml")
-	w.Write(xmlContent)
-
-	log.Printf("成功返回 route.xml 给 %s", r.RemoteAddr)
-}
-
-func serveVersions(w http.ResponseWriter, r *http.Request) {
-	// 从请求的 URL 中提取文件名
-	u, err := url.Parse(r.URL.String())
-	if err != nil {
-		log.Printf("解析 URL 失败: %v", err)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(fmt.Sprintf(`{"errorCode":-7,"errorMsg":"Failed to parse URL: %v"}`, err)))
-		return
-	}
-	path := u.Path
-	filename := filepath.Base(path)
-
-	// 构建 versions 目录下的文件的完整路径
-	versionsDir := "versions"
-	filePath := filepath.Join(versionsDir, filename)
-	log.Printf("filename: %s, filePath: %s", filename, filePath) // 添加日志
-
+// 修改 serveFile 函数，添加 w http.ResponseWriter, r *http.Request 参数
+// 正确的 serveFile 函数定义
+func serveFile(filePath string, w http.ResponseWriter, r *http.Request) {
 	// 检查文件是否存在
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
 		log.Printf("文件不存在: %s", filePath)
+		// 文件不存在时，执行 302 跳转
 		http.Redirect(w, r, redirectURL, http.StatusFound)
 		return
 	}
 
-	// 读取文件内容
-	fileContent, err := ioutil.ReadFile(filePath)
-	if err != nil {
-		log.Printf("读取文件失败: %v", err)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(fmt.Sprintf(`{"errorCode":-8,"errorMsg":"Failed to read file: %v"}`, err)))
-		return
-	}
-
-	// 添加边界检查
-	if len(fileContent) < 15 { // 假设切片操作的索引是 0:15
-		log.Printf("文件内容长度不足，无法进行切片操作")
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(fmt.Sprintf(`{"errorCode":-10,"errorMsg":"File content too short"}`)))
-		return
-	}
-
-	// 设置响应头并发送文件内容
-	w.Header().Set("Content-Type", "application/xml") // 假设是 XML 文件，根据实际情况修改
-	w.Write(fileContent)
-
-	log.Printf("成功返回 %s 给 %s", filePath, r.RemoteAddr)
+	// 转发文件
+	http.ServeFile(w, r, filePath)
+	log.Printf("成功转发文件: %s", filePath)
 }
