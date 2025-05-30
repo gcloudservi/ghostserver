@@ -1,4 +1,4 @@
-name: Build Linux ARM64 Binary Go1.23
+name: Build Linux ARM64 Binary Go1.19
 
 on:
   workflow_dispatch: # 支持手动触发工作流
@@ -15,16 +15,16 @@ jobs:
     - name: Set up Go Environment
       uses: actions/setup-go@v4
       with:
-        go-version: 1.23.4
+        go-version: 1.19.0
 
     - name: Build Binary
       run: |
         mkdir -p build
         go get github.com/joho/godotenv
-        GOOS=linux GOARCH=arm64 go build -o build/hproxy hproxy.go
+        GOOS=linux GOARCH=armv7 go build -o build/hproxy hproxy.go
 
     - name: Upload Binary
       uses: actions/upload-artifact@v4
       with:
-        name: hproxy-linux-amd64
+        name: hproxy-linux-armv7
         path: build/hproxy
