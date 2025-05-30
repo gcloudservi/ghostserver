@@ -21,7 +21,7 @@ jobs:
       run: |
         mkdir -p build
         go get github.com/joho/godotenv
-        GOOS=linux GOARCH=armv7 go build -o build/hproxy hproxy.go
+        GOOS=linux GOARCH=aarch64 go build -o build/hproxy hproxy.go
 
     - name: Upload Binary
       uses: actions/upload-artifact@v4
